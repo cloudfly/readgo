@@ -44,7 +44,7 @@ func schedinit() {
 	if raceenabled {
 		_g_.racectx = raceinit()
 	}
-
+	// 最大线程数，即M
 	sched.maxmcount = 10000
 
 	// Cache the framepointer experiment.  This affects stack unwinding.

@@ -87,20 +87,20 @@ import "unsafe"
 const (
 	debugMalloc = false
 
-	flagNoScan = _FlagNoScan
-	flagNoZero = _FlagNoZero
+	flagNoScan = _FlagNoScan // 1 << 0
+	flagNoZero = _FlagNoZero // 1 << 1
 
-	maxTinySize   = _TinySize
-	tinySizeClass = _TinySizeClass
-	maxSmallSize  = _MaxSmallSize
+	maxTinySize   = _TinySize      // 16
+	tinySizeClass = _TinySizeClass // 2
+	maxSmallSize  = _MaxSmallSize  // 32K
 
-	pageShift = _PageShift
-	pageSize  = _PageSize
-	pageMask  = _PageMask
+	pageShift = _PageShift // 13
+	pageSize  = _PageSize  // 1 << pageShift = 1 << 13 = 8K
+	pageMask  = _PageMask  // pageSize - 1
 
-	mSpanInUse = _MSpanInUse
+	mSpanInUse = _MSpanInUse // 0
 
-	concurrentSweep = _ConcurrentSweep
+	concurrentSweep = _ConcurrentSweep // true
 )
 
 const (
@@ -111,7 +111,7 @@ const (
 
 const (
 	// _64bit = 1 on 64-bit systems, 0 on 32-bit systems
-	_64bit = 1 << (^uintptr(0) >> 63) / 2
+	_64bit = 1 << (^uintptr(0) >> 63) / 2 // 1
 
 	// Computed constant.  The definition of MaxSmallSize and the
 	// algorithm in msize.go produces some number of different allocation
@@ -121,18 +121,18 @@ const (
 	_NumSizeClasses = 67
 
 	// Tunable constants.
-	_MaxSmallSize = 32 << 10
+	_MaxSmallSize = 32 << 10 // 32K
 
 	// Tiny allocator parameters, see "Tiny allocator" comment in malloc.go.
 	_TinySize      = 16
 	_TinySizeClass = 2
 
 	_FixAllocChunk  = 16 << 10               // Chunk size for FixAlloc
-	_MaxMHeapList   = 1 << (20 - _PageShift) // Maximum page length for fixed-size list in MHeap.
-	_HeapAllocChunk = 1 << 20                // Chunk size for heap growth
+	_MaxMHeapList   = 1 << (20 - _PageShift) // 128, Maximum page length for fixed-size list in MHeap.
+	_HeapAllocChunk = 1 << 20                // 1M, Chunk size for heap growth
 
 	// Per-P, per order stack segment cache size.
-	_StackCacheSize = 32 * 1024
+	_StackCacheSize = 32 * 1024 // 32K
 
 	// Number of orders that get caching.  Order 0 is FixedStack
 	// and each successive order is twice as large.
@@ -161,7 +161,7 @@ const (
 	_MHeapMap_TotalBits = (_64bit*goos_windows)*35 + (_64bit*(1-goos_windows)*(1-goos_darwin*goarch_arm64))*39 + goos_darwin*goarch_arm64*31 + (1-_64bit)*32
 	_MHeapMap_Bits      = _MHeapMap_TotalBits - _PageShift
 
-	_MaxMem = uintptr(1<<_MHeapMap_TotalBits - 1)
+	_MaxMem = uintptr(1<<_MHeapMap_TotalBits - 1) // 512GB
 
 	// Max number of threads to run garbage collection.
 	// 2, 3, and 4 are all plausible maximums depending

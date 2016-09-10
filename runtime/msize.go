@@ -50,8 +50,8 @@ var class_to_size [_NumSizeClasses]int32
 var class_to_allocnpages [_NumSizeClasses]int32
 var class_to_divmagic [_NumSizeClasses]divMagic
 
-var size_to_class8 [1024/8 + 1]int8
-var size_to_class128 [(_MaxSmallSize-1024)/128 + 1]int8
+var size_to_class8 [1024/8 + 1]int8                     // length = 129
+var size_to_class128 [(_MaxSmallSize-1024)/128 + 1]int8 // length = 249
 
 func sizeToClass(size int32) int32 {
 	if size > _MaxSmallSize {
@@ -63,6 +63,15 @@ func sizeToClass(size int32) int32 {
 	return int32(size_to_class8[(size+7)>>3])
 }
 
+// initSize 计算出来的结果是(64位ubuntu):
+// class_to_size:
+// 0 8 16 32 48 64 80 96 112 128 144 160 176 192 208 224 240 256 288 320 352 384 416 448 480 512 576 640 704 768 896 1024 1152 1280 1408 1536 1664 2048 2304 2560 2816 3072 3328 4096 4608 5376 6144 6400 6656 6912 8192 8448 8704 9472 10496 12288 13568 14080 16384 16640 17664 20480 21248 24576 24832 28416 32768
+// 上面一共是 67 个 size 大小，单位是字节。0 表示大 size。
+// size_to_class8的结果是:
+// 1 1 2 3 3 4 4 5 5 6 6 7 7 8 8 9 9 10 10 11 11 12 12 13 13 14 14 15 15 16 16 17 17 18 18 18 18 19 19 19 19 20 20 20 20 21 21 21 21 22 22 22 22 23 23 23 23 24 24 24 24 25 25 25 25 26 26 26 26 26 26 26 26 27 27 27 27 27 27 27 27 28 28 28 28 28 28 28 28 29 29 29 29 29 29 29 29 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 30 31 31 31 31 31 31 31 31 31 31 31 31 31 31 31 0
+// size_to_class128的结果是:
+// 31 32 33 34 35 36 37 37 37 38 38 39 39 40 40 41 41 42 42 43 43 43 43 43 43 44 44 44 44 45 45 45 45 45 45 46 46 46 46 46 46 47 47 48 48 49 49 50 50 50 50 50 50 50 50 50 50 51 51 52 52 53 53 53 53 53 53 54 54 54 54 54 54 54 54 55 55 55 55 55 55 55 55 55 55 55 55 55 55 56 56 56 56 56 56 56 56 56 56 57 57 57 57 58 58 58 58 58 58 58 58 58 58 58 58 58 58 58 58 58 58 59 59 60 60 60 60 60 60 60 60 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 61 62 62 62 62 62 62 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 64 64 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 65 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66 66
+// sizeToClass() 函数就是通过上面这两个数组，通过 size 大小得到 class 的。
 func initSizes() {
 	// Initialize the runtime·class_to_size table (and choose class sizes in the process).
 	class_to_size[0] = 0
@@ -85,11 +94,14 @@ func initSizes() {
 		// Make the allocnpages big enough that
 		// the leftover is less than 1/8 of the total,
 		// so wasted space is at most 12.5%.
+		// 整个 allocsize 按 size 大小瓜分，最后会余一块小于 size 大小的内存块。
+		// 下面这个循环是，不断以 8k 为单位增加 allocsize，让上面说的余的这一块儿内存小于整个 allocsize 的 1/8。
+		// 所以，每一块 allocsize 最多有 1/8(12.5%) 会浪费掉，如果不是 size 的整数倍。
 		allocsize := _PageSize
 		for allocsize%size > allocsize/8 {
 			allocsize += _PageSize
 		}
-		npages := allocsize >> _PageShift
+		npages := allocsize >> _PageShift // page个数
 
 		// If the previous sizeclass chose the same
 		// allocation size and fit the same number of
@@ -123,23 +135,6 @@ func initSizes() {
 		}
 	}
 
-	// Double-check SizeToClass.
-	if false {
-		for n := int32(0); n < _MaxSmallSize; n++ {
-			sizeclass := sizeToClass(n)
-			if sizeclass < 1 || sizeclass >= _NumSizeClasses || class_to_size[sizeclass] < n {
-				print("size=", n, " sizeclass=", sizeclass, " runtime·class_to_size=", class_to_size[sizeclass], "\n")
-				print("incorrect SizeToClass\n")
-				goto dump
-			}
-			if sizeclass > 1 && class_to_size[sizeclass-1] >= n {
-				print("size=", n, " sizeclass=", sizeclass, " runtime·class_to_size=", class_to_size[sizeclass], "\n")
-				print("SizeToClass too big\n")
-				goto dump
-			}
-		}
-	}
-
 	testdefersizes()
 
 	// Copy out for statistics table.
@@ -152,27 +147,6 @@ func initSizes() {
 	}
 
 	return
-
-dump:
-	if true {
-		print("NumSizeClasses=", _NumSizeClasses, "\n")
-		print("runtime·class_to_size:")
-		for sizeclass = 0; sizeclass < _NumSizeClasses; sizeclass++ {
-			print(" ", class_to_size[sizeclass], "")
-		}
-		print("\n\n")
-		print("size_to_class8:")
-		for i := 0; i < len(size_to_class8); i++ {
-			print(" ", i*8, "=>", size_to_class8[i], "(", class_to_size[size_to_class8[i]], ")\n")
-		}
-		print("\n")
-		print("size_to_class128:")
-		for i := 0; i < len(size_to_class128); i++ {
-			print(" ", i*128, "=>", size_to_class128[i], "(", class_to_size[size_to_class128[i]], ")\n")
-		}
-		print("\n")
-	}
-	throw("InitSizes failed")
 }
 
 // Returns size of the memory block that mallocgc will allocate if you ask for the size.
