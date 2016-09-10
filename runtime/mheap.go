@@ -44,7 +44,7 @@ type mheap struct {
 	arena_start    uintptr
 	arena_used     uintptr // always mHeap_Map{Bits,Spans} before updating
 	arena_end      uintptr
-	arena_reserved bool
+	arena_reserved bool // 默认永远是 false 好了，只有 32位系统，或64位系统被`ulimit -v`限制了地址空间，这个才为true.
 
 	// central free lists for small size classes.
 	// the padding makes sure that the MCentrals are
@@ -270,6 +270,7 @@ func mlookup(v uintptr, base *uintptr, size *uintptr, sp **mspan) int32 {
 }
 
 // Initialize the heap.
+// 初始化 heap
 func mHeap_Init(h *mheap, spans_size uintptr) {
 	fixAlloc_Init(&h.spanalloc, unsafe.Sizeof(mspan{}), recordspan, unsafe.Pointer(h), &memstats.mspan_sys)
 	fixAlloc_Init(&h.cachealloc, unsafe.Sizeof(mcache{}), nil, nil, &memstats.mcache_sys)

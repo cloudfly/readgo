@@ -16,8 +16,8 @@ type mcache struct {
 	local_scan       uintptr // bytes of scannable heap allocated
 	// Allocator cache for tiny objects w/o pointers.
 	// See "Tiny allocator" comment in malloc.go.
-	tiny             unsafe.Pointer
-	tinyoffset       uintptr
+	tiny             unsafe.Pointer // 大小是 maxTinySize 的 span,用来给小对象用的
+	tinyoffset       uintptr tiny中的偏移量，
 	local_tinyallocs uintptr // number of tiny allocs not counted in other stats
 
 	// The rest is not accessed on every malloc.
@@ -65,19 +65,12 @@ func allocmcache() *mcache {
 	lock(&mheap_.lock)
 	c := (*mcache)(fixAlloc_Alloc(&mheap_.cachealloc))
 	unlock(&mheap_.lock)
-	memclr(unsafe.Pointer(c), unsafe.Sizeof(*c))
+	memclr(unsafe.Pointer(c), unsafe.Sizeof(*c)) // memory clear
 	for i := 0; i < _NumSizeClasses; i++ {
 		c.alloc[i] = &emptymspan
 	}
 
-	// Set first allocation sample size.
-	rate := MemProfileRate
-	if rate > 0x3fffffff { // make 2*rate not overflow
-		rate = 0x3fffffff
-	}
-	if rate != 0 {
-		c.next_sample = int32(int(fastrand1()) % (2 * rate))
-	}
+	// ... remove some code for rate
 
 	return c
 }

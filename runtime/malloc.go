@@ -214,8 +214,11 @@ const _MaxArena32 = 2 << 30
 // if accessed.  Used only for debugging the runtime.
 
 func mallocinit() {
+
+	// 就是初始化 size 相关的几个数组，这几个数组跟据系统不同而不同，所以不能在代码中写死。
 	initSizes()
 
+	// TinySizeClass = 2, _TinySize = 16.
 	if class_to_size[_TinySizeClass] != _TinySize {
 		throw("bad TinySizeClass")
 	}
@@ -261,10 +264,22 @@ func mallocinit() {
 		// allocation at 0x40 << 32 because when using 4k pages with 3-level
 		// translation buffers, the user address space is limited to 39 bits
 		// On darwin/arm64, the address space is even smaller.
-		arenaSize := round(_MaxMem, _PageSize)
-		bitmapSize = arenaSize / (ptrSize * 8 / 4)
-		spansSize = arenaSize / _PageSize * ptrSize
-		spansSize = round(spansSize, _PageSize)
+		arenaSize := round(_MaxMem, _PageSize) // 512G
+
+		// arena 中的每个字(8byte)都要有 4位的标志位。
+		// bitmapSize 空间用来存放标志位，来表示 512G arena的每个字的标志。
+		// 下面这个表达式不好理解，转换一下, arenaSize / ptrSize * 4 / 8
+		// arenaSize 总共 arenaSize / ptrSize 个字，每个字需要 4bit
+		// 所以总共需要 arenaSize / ptrSize * 4 位来存放这些标志
+		// 而这些位除以8就是字节数了，所以
+		// arenaSize / ptrSize * 4 / 8 = arenaSize / (ptrSize * 8 / 4) = 32G
+		bitmapSize = arenaSize / (ptrSize * 8 / 4) // 32G
+
+		// spanSize用来存放所有 span 的地址
+		// arena 可以放下 arenaSize / _PageSize 个 span
+		// 每个 span 的地址需要 ptrSize 大小空间来存。
+		spansSize = arenaSize / _PageSize * ptrSize // 512M
+		spansSize = round(spansSize, _PageSize)     // 512M
 		for i := 0; i <= 0x7f; i++ {
 			switch {
 			case GOARCH == "arm64" && GOOS == "darwin":
@@ -274,7 +289,11 @@ func mallocinit() {
 			default:
 				p = uintptr(i)<<40 | uintptrMask&(0x00c0<<32)
 			}
+
+			// 总共申请内存大小, 32G + 512M + 512G + 8K = 544.5G
 			pSize = bitmapSize + spansSize + arenaSize + _PageSize
+
+			// 申请连续地址空间, sysReserve 对不同的操作系统进行了封装
 			p = uintptr(sysReserve(unsafe.Pointer(p), pSize, &reserved))
 			if p != 0 {
 				break
@@ -282,69 +301,21 @@ func mallocinit() {
 		}
 	}
 
-	if p == 0 {
-		// On a 32-bit machine, we can't typically get away
-		// with a giant virtual address space reservation.
-		// Instead we map the memory information bitmap
-		// immediately after the data segment, large enough
-		// to handle another 2GB of mappings (256 MB),
-		// along with a reservation for an initial arena.
-		// When that gets used up, we'll start asking the kernel
-		// for any memory anywhere and hope it's in the 2GB
-		// following the bitmap (presumably the executable begins
-		// near the bottom of memory, so we'll have to use up
-		// most of memory before the kernel resorts to giving out
-		// memory before the beginning of the text segment).
-		//
-		// Alternatively we could reserve 512 MB bitmap, enough
-		// for 4GB of mappings, and then accept any memory the
-		// kernel threw at us, but normally that's a waste of 512 MB
-		// of address space, which is probably too much in a 32-bit world.
-
-		// If we fail to allocate, try again with a smaller arena.
-		// This is necessary on Android L where we share a process
-		// with ART, which reserves virtual memory aggressively.
-		arenaSizes := []uintptr{
-			512 << 20,
-			256 << 20,
-			128 << 20,
-		}
-
-		for _, arenaSize := range arenaSizes {
-			bitmapSize = _MaxArena32 / (ptrSize * 8 / 4)
-			spansSize = _MaxArena32 / _PageSize * ptrSize
-			if limit > 0 && arenaSize+bitmapSize+spansSize > limit {
-				bitmapSize = (limit / 9) &^ ((1 << _PageShift) - 1)
-				arenaSize = bitmapSize * 8
-				spansSize = arenaSize / _PageSize * ptrSize
-			}
-			spansSize = round(spansSize, _PageSize)
-
-			// SysReserve treats the address we ask for, end, as a hint,
-			// not as an absolute requirement.  If we ask for the end
-			// of the data segment but the operating system requires
-			// a little more space before we can start allocating, it will
-			// give out a slightly higher pointer.  Except QEMU, which
-			// is buggy, as usual: it won't adjust the pointer upward.
-			// So adjust it upward a little bit ourselves: 1/4 MB to get
-			// away from the running binary image and then round up
-			// to a MB boundary.
-			p = round(firstmoduledata.end+(1<<18), 1<<20)
-			pSize = bitmapSize + spansSize + arenaSize + _PageSize
-			p = uintptr(sysReserve(unsafe.Pointer(p), pSize, &reserved))
-			if p != 0 {
-				break
-			}
-		}
-		if p == 0 {
-			throw("runtime: cannot reserve arena virtual address space")
-		}
-	}
+	// ...
+	// 这里删掉了针对 32位系统的处理代码
 
 	// PageSize can be larger than OS definition of page size,
 	// so SysReserve can give us a PageSize-unaligned pointer.
 	// To overcome this we ask for PageSize more and round up the pointer.
 	p1 := round(p, _PageSize)
+	//
+	//      +         +                 +                                    +
+	//      |  512M   |      32G        |                512G                |
+	//      +----------------------------------------------------------------+
+	//      |  span   |     bitmap      |                arena               |
+	//      +----------------------------------------------------------------+
+	//      ^         ^                 ^                                    ^
+	// mheap.spans  mheap.bitmap   mheap.arena_start               mheap.arena_end
 
 	mheap_.spans = (**mspan)(unsafe.Pointer(p1))
 	mheap_.bitmap = p1 + spansSize
@@ -387,7 +358,10 @@ func sysReserveHigh(n uintptr, reserved *bool) unsafe.Pointer {
 	return sysReserve(nil, n, reserved)
 }
 
+// 在 arena区间的 used 内存扩充到 n。并对 span 和 bitmap 区间相应的进行设置。
 func mHeap_SysAlloc(h *mheap, n uintptr) unsafe.Pointer {
+
+	//
 	if n > uintptr(h.arena_end)-uintptr(h.arena_used) {
 		// We are in 32-bit mode, maybe we didn't use all possible address space yet.
 		// Reserve some more space.
@@ -417,6 +391,7 @@ func mHeap_SysAlloc(h *mheap, n uintptr) unsafe.Pointer {
 		}
 	}
 
+	// 其实核心就在这个 if 语句里，其他的都是各种异常的判断
 	if n <= uintptr(h.arena_end)-uintptr(h.arena_used) {
 		// Keep taking from our reservation.
 		p := h.arena_used
@@ -508,6 +483,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 	}
 
 	// Set mp.mallocing to keep from being preempted by GC.
+	// 获取线程 M，
 	mp := acquirem()
 	if mp.mallocing != 0 {
 		throw("malloc deadlock")
@@ -519,10 +495,13 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 
 	shouldhelpgc := false
 	dataSize := size
+	// 当前 goroutine 所在线程M 的 mcache
 	c := gomcache()
 	var s *mspan
 	var x unsafe.Pointer
+	// 空间较小的内存申请, 小于 32k
 	if size <= maxSmallSize {
+		// for tinySize
 		if flags&flagNoScan != 0 && size < maxTinySize {
 			// Tiny allocator.
 			//
@@ -530,7 +509,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			// into a single memory block. The resulting memory block
 			// is freed when all subobjects are unreachable. The subobjects
 			// must be FlagNoScan (don't have pointers), this ensures that
-			// the amount of potentially wasted memory is bounded.
+			// the amount of potentially wasted memory is bounded. // 保证潜在的内存浪费被限制。
 			//
 			// Size of the memory block used for combining (maxTinySize) is tunable.
 			// Current setting is 16 bytes, which relates to 2x worst case memory
@@ -562,6 +541,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			} else if size&1 == 0 {
 				off = round(off, 2)
 			}
+			// tiny 这个 span 中有足够的空间申请，
 			if off+size <= maxTinySize && c.tiny != nil {
 				// The object fits into existing tiny block.
 				x = add(c.tiny, off)
@@ -572,11 +552,12 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 				return x
 			}
 			// Allocate a new maxTinySize block.
+			// tiny 空间不够，从 span 列表中申请一个过来给 tiny
 			s = c.alloc[tinySizeClass]
 			v := s.freelist
-			if v.ptr() == nil {
+			if v.ptr() == nil { // mcache 的 span 列表是空的
 				systemstack(func() {
-					mCache_Refill(c, tinySizeClass)
+					mCache_Refill(c, tinySizeClass) // 冲新填充 mcache 的 span 列表
 				})
 				shouldhelpgc = true
 				s = c.alloc[tinySizeClass]
@@ -587,6 +568,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			// prefetchnta offers best performance, see change list message.
 			prefetchnta(uintptr(v.ptr().next))
 			x = unsafe.Pointer(v)
+			// 下面两句相当于置0了。tinySize是16byte，也就是长度为2的uint64的数组，都置成0，相当于 memset 了
 			(*[2]uint64)(x)[0] = 0
 			(*[2]uint64)(x)[1] = 0
 			// See if we need to replace the existing tiny block with the new one
@@ -597,18 +579,22 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			}
 			size = maxTinySize
 		} else {
+			// 不是 tiny 类型的，直接从 alloc 表里面取一个适当大小的 span
+			// 整体逻辑和上面的 tiny 差不多
 			var sizeclass int8
+			// 根据 size 的大小，确定需要的 sizeclass
 			if size <= 1024-8 {
 				sizeclass = size_to_class8[(size+7)>>3]
 			} else {
 				sizeclass = size_to_class128[(size-1024+127)>>7]
 			}
+
 			size = uintptr(class_to_size[sizeclass])
 			s = c.alloc[sizeclass]
 			v := s.freelist
-			if v.ptr() == nil {
+			if v.ptr() == nil { // span 没有了
 				systemstack(func() {
-					mCache_Refill(c, int32(sizeclass))
+					mCache_Refill(c, int32(sizeclass)) // 重新填充这个 sizeclass 的span
 				})
 				shouldhelpgc = true
 				s = c.alloc[sizeclass]
@@ -619,7 +605,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			// prefetchnta offers best performance, see change list message.
 			prefetchnta(uintptr(v.ptr().next))
 			x = unsafe.Pointer(v)
-			if flags&flagNoZero == 0 {
+			if flags&flagNoZero == 0 { // 这个flag表示，是否对新拿到的内存清0。
 				v.ptr().next = 0
 				if size > 2*ptrSize && ((*[2]uintptr)(x))[1] != 0 {
 					memclr(unsafe.Pointer(v), size)
@@ -628,6 +614,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 		}
 		c.local_cachealloc += size
 	} else {
+		// 大于 32K，是大对象
 		var s *mspan
 		shouldhelpgc = true
 		systemstack(func() {
@@ -637,6 +624,8 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 		size = uintptr(s.elemsize)
 	}
 
+	// 到这里内存分配就结束了，分配的结果就是变量 x
+	// 下面的代码主要和 gc，debug，race 有关。
 	if flags&flagNoScan != 0 {
 		// All objects are pre-marked as noscan. Nothing to do.
 	} else {
@@ -726,13 +715,14 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 	return x
 }
 
+// 为大对象(>=32K)申请 size 大小的内存空间
 func largeAlloc(size uintptr, flag uint32) *mspan {
 	// print("largeAlloc size=", size, "\n")
 
 	if size+_PageSize < size {
 		throw("out of memory")
 	}
-	npages := size >> _PageShift
+	npages := size >> _PageShift // 需要多少页
 	if size&_PageMask != 0 {
 		npages++
 	}
@@ -741,11 +731,12 @@ func largeAlloc(size uintptr, flag uint32) *mspan {
 	// necessary. mHeap_Alloc will also sweep npages, so this only
 	// pays the debt down to npage pages.
 	deductSweepCredit(npages*_PageSize, npages)
-
+	// 直接从 heap 里拿
 	s := mHeap_Alloc(&mheap_, npages, 0, true, flag&_FlagNoZero == 0)
 	if s == nil {
 		throw("out of memory")
 	}
+	// 限制这块儿内存的使用界限。因为虽申请的是 size 大小，而实际 s 的内存可能要大于 size 的。所以这里限定以下。多出 size 部分的内存不能用。
 	s.limit = uintptr(s.start)<<_PageShift + size
 	heapBitsForSpan(s.base()).initSpan(s.layout())
 	return s
