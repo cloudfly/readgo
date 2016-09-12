@@ -556,7 +556,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			// tiny 空间不够，从 span 列表中申请一个过来给 tiny
 			s = c.alloc[tinySizeClass]
 			v := s.freelist
-			if v.ptr() == nil { // mcache 的 span 列表是空的
+			if v.ptr() == nil { // 这个 span 已经用不了了，是空的
 				systemstack(func() {
 					mCache_Refill(c, tinySizeClass) // 冲新填充 mcache 的 span 列表
 				})
@@ -593,7 +593,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			size = uintptr(class_to_size[sizeclass])
 			s = c.alloc[sizeclass]
 			v := s.freelist
-			if v.ptr() == nil { // span 没有了
+			if v.ptr() == nil { // span 没有空间了
 				systemstack(func() {
 					mCache_Refill(c, int32(sizeclass)) // 重新填充这个 sizeclass 的span
 				})

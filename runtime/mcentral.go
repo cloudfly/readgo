@@ -36,6 +36,7 @@ func mCentral_CacheSpan(c *mcentral) *mspan {
 	sg := mheap_.sweepgen
 retry:
 	var s *mspan
+	// nonempty 里的 span 里有空闲的位置给 object 用
 	// 在 nonempty 列表中找到一个没有正在被清理的 span
 	for s = c.nonempty.next; s != &c.nonempty; s = s.next {
 		if s.sweepgen == sg-2 && cas(&s.sweepgen, sg-2, sg-1) {
@@ -45,16 +46,18 @@ retry:
 			mSpan_Sweep(s, true)
 			goto havespan
 		}
-		if s.sweepgen == sg-1 {
+		if s.sweepgen == sg-1 { // 正在被清理
 			// the span is being swept by background sweeper, skip
 			continue
 		}
 		// we have a nonempty span that does not require sweeping, allocate from it
+		// 不需要清理的 span 块
 		mSpanList_Remove(s)
 		mSpanList_InsertBack(&c.empty, s)
 		unlock(&c.lock)
 		goto havespan
 	}
+	// empty 里所有的 span 都已经没有空位置了，都满了
 	// 没有找到 span, 从 empty 列表里找
 	for s = c.empty.next; s != &c.empty; s = s.next {
 		if s.sweepgen == sg-2 && cas(&s.sweepgen, sg-2, sg-1) {
@@ -95,8 +98,8 @@ retry:
 	// At this point s is a non-empty span, queued at the end of the empty list,
 	// c is unlocked.
 havespan:
-	cap := int32((s.npages << _PageShift) / s.elemsize)
-	n := cap - int32(s.ref)
+	cap := int32((s.npages << _PageShift) / s.elemsize) // 这个 span 最多能囊括 object 的个数
+	n := cap - int32(s.ref)                             // 剩余可引用的 object 的数量
 	if n == 0 {
 		throw("empty span")
 	}
@@ -156,6 +159,8 @@ func mCentral_FreeSpan(c *mcentral, s *mspan, n int32, start gclinkptr, end gcli
 	lock(&c.lock)
 
 	// Move to nonempty if necessary.
+	// wasempty 表示的是之前是否是 empty 的，如果是，现在不空了，放到需要放到 nonempty 里了
+	// 如果 wasempty == false，说明之前就在 nonempty 里了，不用挪了
 	if wasempty {
 		mSpanList_Remove(s)
 		mSpanList_Insert(&c.nonempty, s)
@@ -167,12 +172,13 @@ func mCentral_FreeSpan(c *mcentral, s *mspan, n int32, start gclinkptr, end gcli
 	// lock of c above.)
 	atomicstore(&s.sweepgen, mheap_.sweepgen)
 
-	if s.ref != 0 {
+	if s.ref != 0 { // 引用计数不为 0，说明 span 里还有其他 object 被使用被回收
 		unlock(&c.lock)
 		return false
 	}
 
 	// s is completely freed, return it to the heap.
+	// span 里的所有的 object 都被释放了，说明这个 span 可以被回收到 heap 里了
 	mSpanList_Remove(s)
 	s.needzero = 1
 	s.freelist = 0
@@ -183,6 +189,7 @@ func mCentral_FreeSpan(c *mcentral, s *mspan, n int32, start gclinkptr, end gcli
 }
 
 // Fetch a new span from the heap and carve into objects for the free list.
+// 从 heap 中获取新的 span，然后把它切割成 object 放入 freelist 中
 func mCentral_Grow(c *mcentral) *mspan {
 	npages := uintptr(class_to_allocnpages[c.sizeclass])
 	size := uintptr(class_to_size[c.sizeclass])

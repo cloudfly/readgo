@@ -17,8 +17,8 @@ type mcache struct {
 	// Allocator cache for tiny objects w/o pointers.
 	// See "Tiny allocator" comment in malloc.go.
 	tiny             unsafe.Pointer // 大小是 maxTinySize 的 span,用来给小对象用的
-	tinyoffset       uintptr tiny中的偏移量，
-	local_tinyallocs uintptr // number of tiny allocs not counted in other stats
+	tinyoffset       uintptr        // tiny中的偏移量，
+	local_tinyallocs uintptr        // number of tiny allocs not counted in other stats
 
 	// The rest is not accessed on every malloc.
 	alloc [_NumSizeClasses]*mspan // spans to allocate from
@@ -112,6 +112,7 @@ func mCache_Refill(c *mcache, sizeclass int32) *mspan {
 	if s == nil {
 		throw("out of memory")
 	}
+	// 拿到的 span 是 empty 的，表示里面已经没有 object 空位了
 	if s.freelist.ptr() == nil {
 		println(s.ref, (s.npages<<_PageShift)/s.elemsize)
 		throw("empty span")
