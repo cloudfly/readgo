@@ -36,6 +36,7 @@ func mCentral_CacheSpan(c *mcentral) *mspan {
 	sg := mheap_.sweepgen
 retry:
 	var s *mspan
+	// 在 nonempty 列表中找到一个没有正在被清理的 span
 	for s = c.nonempty.next; s != &c.nonempty; s = s.next {
 		if s.sweepgen == sg-2 && cas(&s.sweepgen, sg-2, sg-1) {
 			mSpanList_Remove(s)
@@ -54,7 +55,7 @@ retry:
 		unlock(&c.lock)
 		goto havespan
 	}
-
+	// 没有找到 span, 从 empty 列表里找
 	for s = c.empty.next; s != &c.empty; s = s.next {
 		if s.sweepgen == sg-2 && cas(&s.sweepgen, sg-2, sg-1) {
 			// we have an empty span that requires sweeping,

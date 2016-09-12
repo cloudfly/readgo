@@ -127,9 +127,10 @@ const (
 	_TinySize      = 16
 	_TinySizeClass = 2
 
-	_FixAllocChunk  = 16 << 10               // Chunk size for FixAlloc
-	_MaxMHeapList   = 1 << (20 - _PageShift) // 128, Maximum page length for fixed-size list in MHeap.
-	_HeapAllocChunk = 1 << 20                // 1M, Chunk size for heap growth
+	_FixAllocChunk = 16 << 10               // Chunk size for FixAlloc
+	_MaxMHeapList  = 1 << (20 - _PageShift) // 128, Maximum page length for fixed-size list in MHeap.
+	// heap 从操作系统申请内存时，最少申请 1M
+	_HeapAllocChunk = 1 << 20 // 1M, Chunk size for heap growth
 
 	// Per-P, per order stack segment cache size.
 	_StackCacheSize = 32 * 1024 // 32K
@@ -358,7 +359,7 @@ func sysReserveHigh(n uintptr, reserved *bool) unsafe.Pointer {
 	return sysReserve(nil, n, reserved)
 }
 
-// 在 arena区间的 used 内存扩充到 n。并对 span 和 bitmap 区间相应的进行设置。
+// 在 arena区间的 used 内存扩充(增加) n。并对 span 和 bitmap 区间相应的进行设置。
 func mHeap_SysAlloc(h *mheap, n uintptr) unsafe.Pointer {
 
 	//

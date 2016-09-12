@@ -15,8 +15,8 @@ import "unsafe"
 // but all the other global data is here too.
 type mheap struct {
 	lock      mutex
-	free      [_MaxMHeapList]mspan // free lists of given length
-	freelarge mspan                // free lists length >= _MaxMHeapList
+	free      [_MaxMHeapList]mspan // free lists of given length， 1M 以下
+	freelarge mspan                // free lists length >= _MaxMHeapList, >= 1M
 	busy      [_MaxMHeapList]mspan // busy lists of large objects of given length
 	busylarge mspan                // busy lists of large objects length >= _MaxMHeapList
 	allspans  **mspan              // all spans out there
@@ -128,10 +128,12 @@ type mspan struct {
 	baseMask    uintptr  // if non-0, elemsize is a power of 2, & this will get object allocation base
 }
 
+// span 在内存中的起始地址
 func (s *mspan) base() uintptr {
 	return uintptr(s.start << _PageShift)
 }
 
+// 返回 span 中 元素的大小，最多放元素的个数，以及整个 span 的大小
 func (s *mspan) layout() (size, n, total uintptr) {
 	total = s.npages << _PageShift
 	size = s.elemsize
@@ -414,6 +416,7 @@ func mHeap_Alloc_m(h *mheap, npage uintptr, sizeclass int32, large bool) *mspan 
 	}
 
 	// transfer stats from cache to global
+	// memstat 是用来对内存监控的，可忽略
 	memstats.heap_live += uint64(_g_.m.mcache.local_cachealloc)
 	_g_.m.mcache.local_cachealloc = 0
 	memstats.heap_scan += uint64(_g_.m.mcache.local_scan)
@@ -432,13 +435,13 @@ func mHeap_Alloc_m(h *mheap, npage uintptr, sizeclass int32, large bool) *mspan 
 		s.freelist = 0
 		s.ref = 0
 		s.sizeclass = uint8(sizeclass)
-		if sizeclass == 0 {
+		if sizeclass == 0 { // 大对象，sizeclass 是 0
 			s.elemsize = s.npages << _PageShift
 			s.divShift = 0
 			s.divMul = 0
 			s.divShift2 = 0
 			s.baseMask = 0
-		} else {
+		} else { // 小对象，有 sizeclass 值
 			s.elemsize = uintptr(class_to_size[sizeclass])
 			m := &class_to_divmagic[sizeclass]
 			s.divShift = m.shift
@@ -452,7 +455,7 @@ func mHeap_Alloc_m(h *mheap, npage uintptr, sizeclass int32, large bool) *mspan 
 			memstats.heap_objects++
 			memstats.heap_live += uint64(npage << _PageShift)
 			// Swept spans are at the end of lists.
-			if s.npages < uintptr(len(h.free)) {
+			if s.npages < uintptr(len(h.free)) { 把 span 放入相应 busy 链表中
 				mSpanList_InsertBack(&h.busy[s.npages], s)
 			} else {
 				mSpanList_InsertBack(&h.busylarge, s)
@@ -476,6 +479,8 @@ func mHeap_Alloc_m(h *mheap, npage uintptr, sizeclass int32, large bool) *mspan 
 	return s
 }
 
+// 从 heap 中申请一块 npage 大小的 span，指定 sizeclass。
+// large 用来表示是不是大对象，needzero 表示 span 内存是否需要清零
 func mHeap_Alloc(h *mheap, npage uintptr, sizeclass int32, large bool, needzero bool) *mspan {
 	// Don't do any operations that lock the heap on the G stack.
 	// It might trigger stack growth, and the stack growth code needs
@@ -516,10 +521,13 @@ func mHeap_AllocStack(h *mheap, npage uintptr) *mspan {
 // Allocates a span of the given size.  h must be locked.
 // The returned span has been removed from the
 // free list, but its state is still MSpanFree.
+// 申请指定大小的 span，h 需要被加锁
+// 返回的 span 需要从 free 列表中删除，但状态仍然是 MSpanFree
 func mHeap_AllocSpanLocked(h *mheap, npage uintptr) *mspan {
 	var s *mspan
 
 	// Try in fixed-size lists up to max.
+	// 从 free 列表中找 不小于 npage 大小的 span
 	for i := int(npage); i < len(h.free); i++ {
 		if !mSpanList_IsEmpty(&h.free[i]) {
 			s = h.free[i].next
@@ -528,8 +536,9 @@ func mHeap_AllocSpanLocked(h *mheap, npage uintptr) *mspan {
 	}
 
 	// Best fit in list of large spans.
+	// 从 large span 列表中得到一个 span
 	s = mHeap_AllocLarge(h, npage)
-	if s == nil {
+	if s == nil { // large span 列表中也找不到，扩充 heap 的内存，再重新申请
 		if !mHeap_Grow(h, npage) {
 			return nil
 		}
@@ -547,7 +556,7 @@ HaveSpan:
 	if s.npages < npage {
 		throw("MHeap_AllocLocked - bad npages")
 	}
-	mSpanList_Remove(s)
+	mSpanList_Remove(s) // 把这个 span 从双向链表中移除
 	if s.next != nil || s.prev != nil {
 		throw("still in list")
 	}
@@ -557,9 +566,10 @@ HaveSpan:
 		s.npreleased = 0
 	}
 
-	if s.npages > npage {
+	if s.npages > npage { // 拿到的 span 块要比需要的大，进行切割，切剩下的还给 heap
 		// Trim extra and put it back in the heap.
-		t := (*mspan)(fixAlloc_Alloc(&h.spanalloc))
+		// t 是要还给 heap 的 span，s 是要返回的 span
+		t := (*mspan)(fixAlloc_Alloc(&h.spanalloc)) // 创建一个新 span
 		mSpan_Init(t, s.start+pageID(npage), s.npages-npage)
 		s.npages = npage
 		p := uintptr(t.start)
@@ -571,15 +581,15 @@ HaveSpan:
 		h_spans[p+t.npages-1] = t
 		t.needzero = s.needzero
 		s.state = _MSpanStack // prevent coalescing with s
-		t.state = _MSpanStack
+		t.state = _MSpanStack // 防止在下面 FreeSpan 时这俩 span 合并
 		mHeap_FreeSpanLocked(h, t, false, false, s.unusedsince)
-		s.state = _MSpanFree
+		s.state = _MSpanFree // t 已经还给 heap 了，把 s 的状态设置回去
 	}
 	s.unusedsince = 0
 
 	p := uintptr(s.start)
 	p -= (uintptr(unsafe.Pointer(h.arena_start)) >> _PageShift)
-	for n := uintptr(0); n < npage; n++ {
+	for n := uintptr(0); n < npage; n++ { // page -> span 的反查表
 		h_spans[p+n] = s
 	}
 
@@ -594,6 +604,7 @@ HaveSpan:
 }
 
 // Allocate a span of exactly npage pages from the list of large spans.
+// 从 freeLarge 列表中找到最小的切能放下 npage 的 span
 func mHeap_AllocLarge(h *mheap, npage uintptr) *mspan {
 	return bestFit(&h.freelarge, npage, nil)
 }
@@ -607,7 +618,7 @@ func bestFit(list *mspan, npage uintptr, best *mspan) *mspan {
 			continue
 		}
 		if best == nil || s.npages < best.npages || (s.npages == best.npages && s.start < best.start) {
-			best = s
+			best = s // 循环链表找到最小的，也就是 best
 		}
 	}
 	return best
@@ -620,7 +631,8 @@ func mHeap_Grow(h *mheap, npage uintptr) bool {
 	// the operating system needs to track; also amortizes
 	// the overhead of an operating system mapping.
 	// Allocate a multiple of 64kB.
-	npage = round(npage, (64<<10)/_PageSize)
+	npage = round(npage, (64<<10)/_PageSize) // 64K / 8K = 8页
+	// npage 一定要是 8页 的倍数，即申请的内存是 64K 的倍数。主要就是尽可能多申请。
 	ask := npage << _PageShift
 	if ask < _HeapAllocChunk {
 		ask = _HeapAllocChunk
@@ -628,7 +640,7 @@ func mHeap_Grow(h *mheap, npage uintptr) bool {
 
 	v := mHeap_SysAlloc(h, ask)
 	if v == nil {
-		if ask > npage<<_PageShift {
+		if ask > npage<<_PageShift { // 系统内存不够了，不尽可能多申请了，需要多少来多少。
 			ask = npage << _PageShift
 			v = mHeap_SysAlloc(h, ask)
 		}
@@ -640,6 +652,7 @@ func mHeap_Grow(h *mheap, npage uintptr) bool {
 
 	// Create a fake "in use" span and free it, so that the
 	// right coalescing happens.
+	// 创建一个新 span，然后再释放它，这样会触发一次 span 块的合并。
 	s := (*mspan)(fixAlloc_Alloc(&h.spanalloc))
 	mSpan_Init(s, pageID(uintptr(v)>>_PageShift), ask>>_PageShift)
 	p := uintptr(s.start)
@@ -656,6 +669,7 @@ func mHeap_Grow(h *mheap, npage uintptr) bool {
 // Look up the span at the given address.
 // Address is guaranteed to be in map
 // and is guaranteed to be start or end of span.
+// 给定一个地址，获得这个地址属于的那个 span
 func mHeap_Lookup(h *mheap, v unsafe.Pointer) *mspan {
 	p := uintptr(v)
 	p -= uintptr(unsafe.Pointer(h.arena_start))
@@ -753,21 +767,21 @@ func mHeap_FreeSpanLocked(h *mheap, s *mspan, acctinuse, acctidle bool, unusedsi
 	// Coalesce with earlier, later spans.
 	p := uintptr(s.start)
 	p -= uintptr(unsafe.Pointer(h.arena_start)) >> _PageShift
-	if p > 0 {
+	if p > 0 { // 表示这个 span 的前面(内存地址空间前面)还有与之相连的 span 存在
 		t := h_spans[p-1]
-		if t != nil && t.state != _MSpanInUse && t.state != _MSpanStack {
+		if t != nil && t.state != _MSpanInUse && t.state != _MSpanStack { // 前面这个 span 也没用了
 			s.start = t.start
 			s.npages += t.npages
 			s.npreleased = t.npreleased // absorb released pages
 			s.needzero |= t.needzero
 			p -= t.npages
 			h_spans[p] = s
-			mSpanList_Remove(t)
+			mSpanList_Remove(t) // 把 t 从链表中移除，因为它和 s 已经合并了
 			t.state = _MSpanDead
 			fixAlloc_Free(&h.spanalloc, (unsafe.Pointer)(t))
 		}
 	}
-	if (p+s.npages)*ptrSize < h.spans_mapped {
+	if (p+s.npages)*ptrSize < h.spans_mapped { // 这个 span 不是 spans_mapped 的末尾，就表示 span 后面还有被 map 的 span 存在，尝试合并
 		t := h_spans[p+s.npages]
 		if t != nil && t.state != _MSpanInUse && t.state != _MSpanStack {
 			s.npages += t.npages
@@ -781,6 +795,7 @@ func mHeap_FreeSpanLocked(h *mheap, s *mspan, acctinuse, acctidle bool, unusedsi
 	}
 
 	// Insert s into appropriate list.
+	// 把释放的 span 放入 freelist 中
 	if s.npages < uintptr(len(h.free)) {
 		mSpanList_Insert(&h.free[s.npages], s)
 	} else {
