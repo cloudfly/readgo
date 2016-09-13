@@ -127,14 +127,14 @@ import (
 )
 
 const (
-	_DebugGC         = 0
-	_ConcurrentSweep = true
-	_FinBlockSize    = 4 * 1024
+	_DebugGC         = 0        // 是否开启 gc 的 debug 信息，这个可在编译参数中设定
+	_ConcurrentSweep = true     // 是否开启并发清理
+	_FinBlockSize    = 4 * 1024 // 4M
 
 	// sweepMinHeapDistance is a lower bound on the heap distance
 	// (in bytes) reserved for concurrent sweeping between GC
 	// cycles. This will be scaled by gcpercent/100.
-	sweepMinHeapDistance = 1024 * 1024
+	sweepMinHeapDistance = 1024 * 1024 // 1M
 )
 
 // heapminimum is the minimum heap size at which to trigger GC.
@@ -149,10 +149,10 @@ const (
 // GOGC==0, this will set heapminimum to 0, resulting in constant
 // collection even when the heap size is small, which is useful for
 // debugging.
-var heapminimum uint64 = defaultHeapMinimum
+var heapminimum uint64 = defaultHeapMinimum // 4M，出发 GC 的最小堆空间，有时对空间很小，没必要触发 GC，所以要设定最小值
 
 // defaultHeapMinimum is the value of heapminimum for GOGC==100.
-const defaultHeapMinimum = 4 << 20
+const defaultHeapMinimum = 4 << 20 // 4M
 
 // Initialized from $GOGC.  GOGC=off means no GC.
 var gcpercent int32
@@ -211,10 +211,12 @@ func setGCPercent(in int32) (out int32) {
 
 // Garbage collector phase.
 // Indicates to write barrier and sychronization task to preform.
+// 全局的 GC 阶段，其值在下面 const 中定义了，包括 _GCoff, _GCmark, _GCmarktermination
 var gcphase uint32
 
 // The compiler knows about this variable.
 // If you change it, you must change the compiler too.
+// 写屏障，GC 过程中用的
 var writeBarrier struct {
 	enabled bool // compiler emits a check of this before calling write barrier
 	needed  bool // whether we need a write barrier for current GC phase
@@ -224,6 +226,8 @@ var writeBarrier struct {
 // gcBlackenEnabled is 1 if mutator assists and background mark
 // workers are allowed to blacken objects. This must only be set when
 // gcphase == _GCmark.
+// 当 mutator 辅助和后台标记进程允许黑化对象时候，这个值为 1
+// 只有在 _GCmark 阶段才可以设定这个值
 var gcBlackenEnabled uint32
 
 // gcBlackenPromptly indicates that optimizations that may
@@ -239,18 +243,23 @@ var gcBlackenEnabled uint32
 // since more work is done in the mark phase. This tension is resolved
 // by allocating white until the mark phase is approaching its end and
 // then allocating black for the remainder of the mark phase.
+// 立即黑化，对于新分配的对象，我们是将新对象标记成 白色，还是 黑色 呢？
+// 不同的 GC 阶段，这个值是不同的。 true 表示立即黑化，就是对新对象标记成黑色
 var gcBlackenPromptly bool
 
+// GC 的 3 个阶段
 const (
-	_GCoff             = iota // GC not running; sweeping in background, write barrier disabled
-	_GCmark                   // GC marking roots and workbufs, write barrier ENABLED
-	_GCmarktermination        // GC mark termination: allocate black, P's help GC, write barrier ENABLED
+	_GCoff             = iota // GC not running; sweeping in background, write barrier disabled，暂停阶段
+	_GCmark                   // GC marking roots and workbufs, write barrier ENABLED // 标记阶段
+	_GCmarktermination        // GC mark termination: allocate black, P's help GC, write barrier ENABLED // 停标阶段
 )
 
 //go:nosplit
 func setGCPhase(x uint32) {
 	atomic.Store(&gcphase, x)
+	// 标记和停标阶段，写屏障是需要的
 	writeBarrier.needed = gcphase == _GCmark || gcphase == _GCmarktermination
+	// 开启写屏障，如果需要的话，或者是用 CGO 编译。
 	writeBarrier.enabled = writeBarrier.needed || writeBarrier.cgo
 }
 
@@ -261,12 +270,16 @@ func setGCPhase(x uint32) {
 // is mutator assists, which happen in response to allocations and are
 // not scheduled. The other three are variations in the per-P mark
 // workers and are distinguished by gcMarkWorkerMode.
+// 标记工作是由多个 worker 并行完成的，其执行的模式有 4 种机制
+// 1. mutator 辅助
+// 2,3,4 在下面的 const 定义中有描述
 type gcMarkWorkerMode int
 
 const (
 	// gcMarkWorkerDedicatedMode indicates that the P of a mark
 	// worker is dedicated to running that mark worker. The mark
 	// worker should run without preemption.
+	// worker 所在的 P 全力执行标记工作, 而且标记工作不能被抢占
 	gcMarkWorkerDedicatedMode gcMarkWorkerMode = iota
 
 	// gcMarkWorkerFractionalMode indicates that a P is currently
@@ -275,12 +288,14 @@ const (
 	// integer. The fractional worker should run until it is
 	// preempted and will be scheduled to pick up the fractional
 	// part of GOMAXPROCS*gcGoalUtilization.
+	// worker 所在的 P 适当的执行标记工作，标记工作可能会在执行过程中被抢占。
 	gcMarkWorkerFractionalMode
 
 	// gcMarkWorkerIdleMode indicates that a P is running the mark
 	// worker because it has nothing else to do. The idle worker
 	// should run until it is preempted and account its time
 	// against gcController.idleMarkTime.
+	// 只在空闲的状态下才标记。
 	gcMarkWorkerIdleMode
 )
 
@@ -349,6 +364,7 @@ type gcControllerState struct {
 
 	// heapGoal is the goal memstats.heap_live for when this cycle
 	// ends. This is computed at the beginning of each cycle.
+	// heap 有效对象目标值，就是说，当 heap 中的有效对象所占空间，达到了这个 heapGoal 了，就进行 GC。
 	heapGoal uint64
 
 	// dedicatedMarkWorkersNeeded is the number of dedicated mark
@@ -380,6 +396,8 @@ type gcControllerState struct {
 	// GC should start when the live heap has reached 1.6 times
 	// the heap size marked by the previous cycle. This is updated
 	// at the end of of each cycle.
+	// GC 的 触发比例，比如当前 heap 中有效对象空间是 1M，那么下次 GC 就等到有效对象空间增长到 1M * (triggerRatio+1) 大小时候。
+	// 实际就是那个 GOGC 的值
 	triggerRatio float64
 
 	_ [sys.CacheLineSize]byte
@@ -430,7 +448,9 @@ func (c *gcControllerState) startCycle() {
 
 	// Compute the total mark utilization goal and divide it among
 	// dedicated and fractional workers.
+	// 计算出 GC 能用的所有 CPU，最大 CPU 数 * 0.25
 	totalUtilizationGoal := float64(gomaxprocs) * gcGoalUtilization
+	// 这个最大核数 GOMAXPROCS / 4，得到的整数部分，表示专注于标记的 P 的数量。如果是小数，会设置一个适当执行标记的 P
 	c.dedicatedMarkWorkersNeeded = int64(totalUtilizationGoal)
 	c.fractionalUtilizationGoal = totalUtilizationGoal - float64(c.dedicatedMarkWorkersNeeded)
 	if c.fractionalUtilizationGoal > 0 {
@@ -721,6 +741,7 @@ func (c *gcControllerState) findRunnableGCWorker(_p_ *p) *g {
 
 // gcGoalUtilization is the goal CPU utilization for background
 // marking as a fraction of GOMAXPROCS.
+// gc 操作要利用多少的 CPU
 const gcGoalUtilization = 0.25
 
 // gcCreditSlack is the amount of scan work credit that can can
