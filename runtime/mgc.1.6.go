@@ -857,17 +857,18 @@ var work struct {
 // GC runs a garbage collection and blocks the caller until the
 // garbage collection is complete. It may also block the entire
 // program.
+// 阻塞式的垃圾回收，这个函数会阻塞整个程序，而不是仅仅一个 goroutine 或线程
 func GC() {
 	gcStart(gcForceBlockMode, false)
 }
 
 // gcMode indicates how concurrent a GC cycle should be.
-type gcMode int
+type gcMode int // gc 模式
 
 const (
-	gcBackgroundMode gcMode = iota // concurrent GC and sweep
-	gcForceMode                    // stop-the-world GC now, concurrent sweep
-	gcForceBlockMode               // stop-the-world GC now and STW sweep
+	gcBackgroundMode gcMode = iota // concurrent GC and sweep, 并发 GC 和清理，就是 GC 工作不会阻塞用户代码，他们是并发执行的
+	gcForceMode                    // stop-the-world GC now, concurrent sweep，阻塞程序，然后并发清理
+	gcForceBlockMode               // stop-the-world GC now and STW sweep，阻塞程序，不并发清理
 )
 
 // gcShouldStart returns true if the exit condition for the _GCoff
@@ -876,7 +877,11 @@ const (
 //
 // If forceTrigger is true, it ignores the current heap size, but
 // checks all other conditions. In general this should be false.
+// 决定 GC 是否应该开始
 func gcShouldStart(forceTrigger bool) bool {
+	// gc 正处于 OFF 阶段，就是当前 gc 没有正在执行
+	// 并且参数 forceTrigger 是 true，或者内存的活跃空间已经超过了 next_gc 这个预估值
+	// 并且开启了 gc 功能
 	return gcphase == _GCoff && (forceTrigger || memstats.heap_live >= memstats.next_gc) && memstats.enablegc && panicking == 0 && gcpercent >= 0
 }
 
@@ -892,8 +897,10 @@ func gcStart(mode gcMode, forceTrigger bool) {
 	// the guts of a number of libraries that might be holding
 	// locks, don't attempt to start GC in non-preemptible or
 	// potentially unstable situations.
-	mp := acquirem()
-	if gp := getg(); gp == mp.g0 || mp.locks > 1 || mp.preemptoff != "" {
+	// 因为 gcStart 这个函数是在申请内存(malloc) 时执行的，而申请内存很多都是
+	// 拿着锁的一些库来调用的，gc 不会尝试在 不可抢占情况 或 有潜在不稳定 的情况下执行的。
+	mp := acquirem()                                                      // 线程 M
+	if gp := getg(); gp == mp.g0 || mp.locks > 1 || mp.preemptoff != "" { // TODO: gp == mp.g0 没太懂
 		releasem(mp)
 		return
 	}
