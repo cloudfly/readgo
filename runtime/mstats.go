@@ -68,21 +68,30 @@ type mstats struct {
 	// That is: retained by the most recent GC plus allocated
 	// since then. heap_live <= heap_alloc, since heap_live
 	// excludes unmarked objects that have not yet been swept.
+	// heap_live 是被 GC 视为活跃状态的字节数
+	// 是最近一次 GC 保留的内存，加上自那次以来新分配的
+	// heap_live <= heap_alloc，因为 heap_live 不包括未标记对象(还没有被清理的)
 	heap_live uint64
 
 	// heap_scan is the number of bytes of "scannable" heap. This
 	// is the live heap (as counted by heap_live), but omitting
 	// no-scan objects and no-scan tails of objects.
+	// heap_scan 是 heap 上可被扫描的所有字节数。
+	// 就是把 heap_live 加上 未扫描对象 及 未扫描的对象尾巴
+	// 所以 heap_scan <= heap_live
 	heap_scan uint64
 
 	// heap_marked is the number of bytes marked by the previous
 	// GC. After mark termination, heap_live == heap_marked, but
 	// unlike heap_live, heap_marked does not change until the
 	// next mark termination.
+	// heap_marked 是由上次 GC 标记的字节数。在停标阶段后，heap_live == heap_marked,
+	// 但又不同于 heap_live, heap_marked 在下次停标阶段前，是不会改变的。
 	heap_marked uint64
 
 	// heap_reachable is an estimate of the reachable heap bytes
 	// at the end of the previous GC.
+	// 这个值是前一次 GC 结束时，对可到达对象字节数的预估
 	heap_reachable uint64
 }
 
