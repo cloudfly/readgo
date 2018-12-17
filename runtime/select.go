@@ -63,10 +63,6 @@ func newselect(sel *hselect, selsize int64, size int32) {
 	sel.ncase = 0
 	sel.lockorder = (**hchan)(add(unsafe.Pointer(&sel.scase), uintptr(size)*unsafe.Sizeof(hselect{}.scase[0])))
 	sel.pollorder = (*uint16)(add(unsafe.Pointer(sel.lockorder), uintptr(size)*unsafe.Sizeof(*hselect{}.lockorder)))
-
-	if debugSelect {
-		print("newselect s=", sel, " size=", size, "\n")
-	}
 }
 
 //go:nosplit
@@ -92,10 +88,6 @@ func selectsendImpl(sel *hselect, c *hchan, pc uintptr, elem unsafe.Pointer, so 
 	cas.so = uint16(so)
 	cas.kind = caseSend
 	cas.elem = elem
-
-	if debugSelect {
-		print("selectsend s=", sel, " pc=", hex(cas.pc), " chan=", cas.c, " so=", cas.so, "\n")
-	}
 }
 
 //go:nosplit
@@ -129,10 +121,6 @@ func selectrecvImpl(sel *hselect, c *hchan, pc uintptr, elem unsafe.Pointer, rec
 	cas.kind = caseRecv
 	cas.elem = elem
 	cas.receivedp = received
-
-	if debugSelect {
-		print("selectrecv s=", sel, " pc=", hex(cas.pc), " chan=", cas.c, " so=", cas.so, "\n")
-	}
 }
 
 //go:nosplit
@@ -152,10 +140,6 @@ func selectdefaultImpl(sel *hselect, callerpc uintptr, so uintptr) {
 	cas.c = nil
 	cas.so = uint16(so)
 	cas.kind = caseDefault
-
-	if debugSelect {
-		print("selectdefault s=", sel, " pc=", hex(cas.pc), " so=", cas.so, "\n")
-	}
 }
 
 func sellock(sel *hselect) {
@@ -217,9 +201,6 @@ func selectgo(sel *hselect) {
 // selectgoImpl returns scase.pc and scase.so for the select
 // case which fired.
 func selectgoImpl(sel *hselect) (uintptr, uint16) {
-	if debugSelect {
-		print("select: sel=", sel, "\n")
-	}
 
 	scaseslice := slice{unsafe.Pointer(&sel.scase), int(sel.ncase), int(sel.ncase)}
 	scases := *(*[]scase)(unsafe.Pointer(&scaseslice))
@@ -442,10 +423,6 @@ loop:
 		throw("selectgo: shouldn't happen")
 	}
 
-	if debugSelect {
-		print("wait-return: sel=", sel, " c=", c, " cas=", cas, " kind=", cas.kind, "\n")
-	}
-
 	if cas.kind == caseRecv {
 		if cas.receivedp != nil {
 			*cas.receivedp = true
@@ -532,9 +509,6 @@ syncrecv:
 		racesync(c, sg)
 	}
 	selunlock(sel)
-	if debugSelect {
-		print("syncrecv: sel=", sel, " c=", c, "\n")
-	}
 	if cas.receivedp != nil {
 		*cas.receivedp = true
 	}
@@ -571,9 +545,7 @@ syncsend:
 		racesync(c, sg)
 	}
 	selunlock(sel)
-	if debugSelect {
-		print("syncsend: sel=", sel, " c=", c, "\n")
-	}
+
 	if sg.elem != nil {
 		syncsend(c, sg, cas.elem)
 	}
@@ -621,37 +593,6 @@ const (
 	selectRecv              // case <-Chan:
 	selectDefault           // default
 )
-
-//go:linkname reflect_rselect reflect.rselect
-func reflect_rselect(cases []runtimeSelect) (chosen int, recvOK bool) {
-	// flagNoScan is safe here, because all objects are also referenced from cases.
-	size := selectsize(uintptr(len(cases)))
-	sel := (*hselect)(mallocgc(size, nil, flagNoScan))
-	newselect(sel, int64(size), int32(len(cases)))
-	r := new(bool)
-	for i := range cases {
-		rc := &cases[i]
-		switch rc.dir {
-		case selectDefault:
-			selectdefaultImpl(sel, uintptr(i), 0)
-		case selectSend:
-			if rc.ch == nil {
-				break
-			}
-			selectsendImpl(sel, rc.ch, uintptr(i), rc.val, 0)
-		case selectRecv:
-			if rc.ch == nil {
-				break
-			}
-			selectrecvImpl(sel, rc.ch, uintptr(i), rc.val, r, 0)
-		}
-	}
-
-	pc, _ := selectgoImpl(sel)
-	chosen = int(pc)
-	recvOK = *r
-	return
-}
 
 func (q *waitq) dequeueSudoG(sgp *sudog) {
 	x := sgp.prev

@@ -11,7 +11,6 @@ import "unsafe"
 const (
 	maxAlign  = 8
 	hchanSize = unsafe.Sizeof(hchan{}) + uintptr(-int(unsafe.Sizeof(hchan{}))&(maxAlign-1))
-	debugChan = false
 )
 
 type hchan struct {
@@ -75,13 +74,10 @@ func makechan(t *chantype, size int64) *hchan {
 	c.elemtype = elem
 	c.dataqsiz = uint(size)
 
-	if debugChan {
-		print("makechan: chan=", c, "; elemsize=", elem.size, "; elemalg=", elem.alg, "; dataqsiz=", size, "\n")
-	}
 	return c
 }
 
-// chanbuf(c, i) is pointer to the i'th slot in the buffer.
+// chanbuf(c, i) 返回 buffer 中第 i 位数据的地址(指针)
 func chanbuf(c *hchan, i uint) unsafe.Pointer {
 	return add(c.buf, uintptr(i)*uintptr(c.elemsize))
 }
@@ -103,26 +99,18 @@ func chansend1(t *chantype, c *hchan, elem unsafe.Pointer) {
  * when a channel involved in the sleep has
  * been closed.  it is easiest to loop and re-run
  * the operation; we'll see that it's now closed.
+ * 如果参数 block == false, 那么该函数不会阻塞，而是直接返回是否成功发送数据到 channel
  */
 func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
-	if raceenabled {
-		raceReadObjectPC(t.elem, ep, callerpc, funcPC(chansend))
-	}
-
+	// channel 的值是 nil
 	if c == nil {
 		if !block {
+			// 如果不 block, 则直接返回 false, 表示发送失败
 			return false
 		}
+		// 项一个 nil 的 channel 发送数据, 永远 block 在这里
 		gopark(nil, nil, "chan send (nil chan)", traceEvGoStop, 2)
 		throw("unreachable")
-	}
-
-	if debugChan {
-		print("chansend: chan=", c, "\n")
-	}
-
-	if raceenabled {
-		racereadpc(unsafe.Pointer(c), callerpc, funcPC(chansend))
 	}
 
 	// Fast path: check for failed non-blocking operation without acquiring the lock.
@@ -139,32 +127,32 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 	// It is okay if the reads are reordered here: if we observe that the channel is not
 	// ready for sending and then observe that it is not closed, that implies that the
 	// channel wasn't closed during the first observation.
+	// 快速通道, 在不需要加锁的情况下完成操作
+	// 如果操作(不阻塞发送 && channel 没有关闭 && 目前没有 goroutine 正在读这个 channel), 这直接返回 false
 	if !block && c.closed == 0 && ((c.dataqsiz == 0 && c.recvq.first == nil) ||
 		(c.dataqsiz > 0 && c.qcount == c.dataqsiz)) {
 		return false
 	}
 
 	var t0 int64
-	if blockprofilerate > 0 {
-		t0 = cputicks()
-	}
 
 	lock(&c.lock)
+
+	// channel 已经被 close 了，直接 panic
 	if c.closed != 0 {
 		unlock(&c.lock)
 		panic("send on closed channel")
 	}
 
+	// 同步 channel, 也就是长度是 0 的 channel, no buffer channel
 	if c.dataqsiz == 0 { // synchronous channel
 		sg := c.recvq.dequeue()
 		if sg != nil { // found a waiting receiver
-			if raceenabled {
-				racesync(c, sg)
-			}
 			unlock(&c.lock)
 
 			recvg := sg.g
 			if sg.elem != nil {
+				// syncsend 实际上是从一个 goroutine 的 stack 空间, copy value 到另一个 goroutine 的 stack 空间, 以此来减少 gc
 				syncsend(c, sg, ep)
 			}
 			recvg.param = unsafe.Pointer(sg)
@@ -180,8 +168,9 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 			return false
 		}
 
+		// 没有接收者, 则将当前的 goroutine 阻塞住, 放到 channel 的 sendq 里面
 		// no receiver available: block on this channel.
-		gp := getg()
+		gp := getg() // gp 表示当前要执行发送操作的 goroutine
 		mysg := acquireSudog()
 		mysg.releasetime = 0
 		if t0 != 0 {
@@ -197,6 +186,7 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 		goparkunlock(&c.lock, "chan send", traceEvGoBlockSend, 3)
 
 		// someone woke us up.
+		// goroutine 被唤醒了, 因为有其他 goroutine 要从 channel 中读取数据
 		if mysg != gp.waiting {
 			throw("G waiting list is corrupted!")
 		}
@@ -208,9 +198,6 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 			panic("send on closed channel")
 		}
 		gp.param = nil
-		if mysg.releasetime > 0 {
-			blockevent(int64(mysg.releasetime)-t0, 2)
-		}
 		releaseSudog(mysg)
 		return true
 	}
@@ -218,8 +205,9 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 	// asynchronous channel
 	// wait for some space to write our data
 	var t1 int64
+	// 循环等待 channel 有空位了, 这个循环内 goroutine 可能会被反复的 block 和 ready, 但直到把数据放到 buffer 了才退出循环
 	for futile := byte(0); c.qcount >= c.dataqsiz; futile = traceFutileWakeup {
-		if !block {
+		if !block { // 非阻塞就直接退出就行了
 			unlock(&c.lock)
 			return false
 		}
@@ -232,26 +220,24 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 		mysg.g = gp
 		mysg.elem = nil
 		mysg.selectdone = nil
+		// 加到 sendq 队列中
 		c.sendq.enqueue(mysg)
+		// 阻塞等待被唤醒
 		goparkunlock(&c.lock, "chan send", traceEvGoBlockSend|futile, 3)
 
 		// someone woke us up - try again
+		// channel 有空间了, 被唤醒, 参见 chanrecv() 方法, 那里会因为读 channel 操作而唤醒这里的写 channel goroutine
 		if mysg.releasetime > 0 {
 			t1 = mysg.releasetime
 		}
 		releaseSudog(mysg)
 		lock(&c.lock)
-		if c.closed != 0 {
+		if c.closed != 0 { // 被唤醒后发现 channel 已经被 close 了, 直接 panic
 			unlock(&c.lock)
 			panic("send on closed channel")
 		}
 	}
 
-	// write our data into the channel buffer
-	if raceenabled {
-		raceacquire(chanbuf(c, c.sendx))
-		racerelease(chanbuf(c, c.sendx))
-	}
 	typedmemmove(c.elemtype, chanbuf(c, c.sendx), ep)
 	c.sendx++
 	if c.sendx == c.dataqsiz {
@@ -260,6 +246,7 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 	c.qcount++
 
 	// wake up a waiting receiver
+	// 把数据成功放到 channel buffer 中后, 尝试唤醒一个等待接收 channel 的 goroutine
 	sg := c.recvq.dequeue()
 	if sg != nil {
 		recvg := sg.g
@@ -270,9 +257,6 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 		goready(recvg, 3)
 	} else {
 		unlock(&c.lock)
-	}
-	if t1 > 0 {
-		blockevent(t1-t0, 2)
 	}
 	return true
 }
@@ -303,12 +287,6 @@ func closechan(c *hchan) {
 		panic("close of closed channel")
 	}
 
-	if raceenabled {
-		callerpc := getcallerpc(unsafe.Pointer(&c))
-		racewritepc(unsafe.Pointer(c), callerpc, funcPC(closechan))
-		racerelease(unsafe.Pointer(c))
-	}
-
 	c.closed = 1
 
 	// release all readers
@@ -320,9 +298,6 @@ func closechan(c *hchan) {
 		gp := sg.g
 		sg.elem = nil
 		gp.param = nil
-		if sg.releasetime != 0 {
-			sg.releasetime = cputicks()
-		}
 		goready(gp, 3)
 	}
 
@@ -335,9 +310,6 @@ func closechan(c *hchan) {
 		gp := sg.g
 		sg.elem = nil
 		gp.param = nil
-		if sg.releasetime != 0 {
-			sg.releasetime = cputicks()
-		}
 		goready(gp, 3)
 	}
 	unlock(&c.lock)
@@ -363,10 +335,7 @@ func chanrecv2(t *chantype, c *hchan, elem unsafe.Pointer) (received bool) {
 func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, received bool) {
 	// raceenabled: don't need to check ep, as it is always on the stack.
 
-	if debugChan {
-		print("chanrecv: chan=", c, "\n")
-	}
-
+	// 同 chansend 一样, 从一个 nil 的 channel 读取数据, 也会永远 block
 	if c == nil {
 		if !block {
 			return
@@ -393,11 +362,6 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 		return
 	}
 
-	var t0 int64
-	if blockprofilerate > 0 {
-		t0 = cputicks()
-	}
-
 	lock(&c.lock)
 	if c.dataqsiz == 0 { // synchronous channel
 		if c.closed != 0 {
@@ -406,9 +370,6 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 
 		sg := c.sendq.dequeue()
 		if sg != nil {
-			if raceenabled {
-				racesync(c, sg)
-			}
 			unlock(&c.lock)
 
 			if ep != nil {
@@ -435,9 +396,6 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 		gp := getg()
 		mysg := acquireSudog()
 		mysg.releasetime = 0
-		if t0 != 0 {
-			mysg.releasetime = -1
-		}
 		mysg.elem = ep
 		mysg.waitlink = nil
 		gp.waiting = mysg
@@ -452,9 +410,6 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 			throw("G waiting list is corrupted!")
 		}
 		gp.waiting = nil
-		if mysg.releasetime > 0 {
-			blockevent(mysg.releasetime-t0, 2)
-		}
 		haveData := gp.param != nil
 		gp.param = nil
 		releaseSudog(mysg)
@@ -475,13 +430,9 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 
 	// asynchronous channel
 	// wait for some data to appear
-	var t1 int64
 	for futile := byte(0); c.qcount <= 0; futile = traceFutileWakeup {
 		if c.closed != 0 {
 			selected, received = recvclosed(c, ep)
-			if t1 > 0 {
-				blockevent(t1-t0, 2)
-			}
 			return
 		}
 
@@ -494,28 +445,17 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 		gp := getg()
 		mysg := acquireSudog()
 		mysg.releasetime = 0
-		if t0 != 0 {
-			mysg.releasetime = -1
-		}
 		mysg.elem = nil
 		mysg.g = gp
 		mysg.selectdone = nil
 
 		c.recvq.enqueue(mysg)
 		goparkunlock(&c.lock, "chan receive", traceEvGoBlockRecv|futile, 3)
-
 		// someone woke us up - try again
-		if mysg.releasetime > 0 {
-			t1 = mysg.releasetime
-		}
 		releaseSudog(mysg)
 		lock(&c.lock)
 	}
 
-	if raceenabled {
-		raceacquire(chanbuf(c, c.recvx))
-		racerelease(chanbuf(c, c.recvx))
-	}
 	if ep != nil {
 		typedmemmove(c.elemtype, ep, chanbuf(c, c.recvx))
 	}
@@ -540,9 +480,6 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 		unlock(&c.lock)
 	}
 
-	if t1 > 0 {
-		blockevent(t1-t0, 2)
-	}
 	selected = true
 	received = true
 	return
@@ -552,9 +489,6 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 // when the receiver encounters a closed channel.
 // Caller must hold c.lock, recvclosed will release the lock.
 func recvclosed(c *hchan, ep unsafe.Pointer) (selected, recevied bool) {
-	if raceenabled {
-		raceacquire(unsafe.Pointer(c))
-	}
 	unlock(&c.lock)
 	if ep != nil {
 		memclr(ep, uintptr(c.elemsize))
@@ -628,32 +562,6 @@ func selectnbrecv2(t *chantype, elem unsafe.Pointer, received *bool, c *hchan) (
 	return
 }
 
-//go:linkname reflect_chansend reflect.chansend
-func reflect_chansend(t *chantype, c *hchan, elem unsafe.Pointer, nb bool) (selected bool) {
-	return chansend(t, c, elem, !nb, getcallerpc(unsafe.Pointer(&t)))
-}
-
-//go:linkname reflect_chanrecv reflect.chanrecv
-func reflect_chanrecv(t *chantype, c *hchan, nb bool, elem unsafe.Pointer) (selected bool, received bool) {
-	return chanrecv(t, c, elem, !nb)
-}
-
-//go:linkname reflect_chanlen reflect.chanlen
-func reflect_chanlen(c *hchan) int {
-	if c == nil {
-		return 0
-	}
-	return int(c.qcount)
-}
-
-//go:linkname reflect_chancap reflect.chancap
-func reflect_chancap(c *hchan) int {
-	if c == nil {
-		return 0
-	}
-	return int(c.dataqsiz)
-}
-
 //go:linkname reflect_chanclose reflect.chanclose
 func reflect_chanclose(c *hchan) {
 	closechan(c)
@@ -699,11 +607,4 @@ func (q *waitq) dequeue() *sudog {
 
 		return sgp
 	}
-}
-
-func racesync(c *hchan, sg *sudog) {
-	racerelease(chanbuf(c, 0))
-	raceacquireg(sg.g, chanbuf(c, 0))
-	racereleaseg(sg.g, chanbuf(c, 0))
-	raceacquire(chanbuf(c, 0))
 }
