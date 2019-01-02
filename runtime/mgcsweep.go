@@ -70,6 +70,7 @@ func bgsweep(c chan int) {
 
 // sweeps one span
 // returns number of pages returned to heap, or ^uintptr(0) if there is nothing to sweep
+// 清理一个 span，返回被清理的页数，如果什么都没清理，就返回 ^uintptr(0)
 //go:nowritebarrier
 func sweepone() uintptr {
 	_g_ := getg()
@@ -80,21 +81,24 @@ func sweepone() uintptr {
 	sg := mheap_.sweepgen
 	for {
 		idx := xadd(&sweep.spanidx, 1) - 1
-		if idx >= uint32(len(work.spans)) {
+		if idx >= uint32(len(work.spans)) { // 清理的游标已经超出了所有 span 的范围，说明全都清理完了
 			mheap_.sweepdone = 1
 			_g_.m.locks--
 			return ^uintptr(0)
 		}
 		s := work.spans[idx]
-		if s.state != mSpanInUse {
+		// 只有 InUse 状态的才需要清理，其他的不需要
+		if s.state != mSpanInUse { // span 状态不对，标记成 “已清理过，待用”。
 			s.sweepgen = sg
 			continue
 		}
+		// sweepgen != sg-2 表示 span 不需要清理。
+		// !cas() 表示把 sweepgen 从 sg-2 置成 sg-1 失败。失败的情况说明，其他线程再同一时间对 s.sweepgen 进行修改
 		if s.sweepgen != sg-2 || !cas(&s.sweepgen, sg-2, sg-1) {
 			continue
 		}
 		npages := s.npages
-		if !mSpan_Sweep(s, false) {
+		if !mSpan_Sweep(s, false) { // 对 span 进行清理，但不把 span 归还给 heap
 			npages = 0
 		}
 		_g_.m.locks--
@@ -178,7 +182,7 @@ func mSpan_Sweep(s *mspan, preserve bool) bool {
 	freeToHeap := false
 
 	// Mark any free objects in this span so we don't collect them.
-	sstart := uintptr(s.start << _PageShift)
+	sstart := uintptr(s.start << _PageShift) // span 的起始地址
 	for link := s.freelist; link.ptr() != nil; link = link.ptr().next {
 		if uintptr(link) < sstart || s.limit <= uintptr(link) {
 			// Free list is corrupted.
