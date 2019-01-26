@@ -400,28 +400,11 @@ func mHeap_Alloc_m(h *mheap, npage uintptr, sizeclass int32, large bool) *mspan 
 	if _g_ != _g_.m.g0 {
 		throw("_mheap_alloc not on g0 stack")
 	}
-	lock(&h.lock)
-
-	// To prevent excessive heap growth, before allocating n pages
-	// we need to sweep and reclaim at least n pages.
-	if h.sweepdone == 0 {
-		// TODO(austin): This tends to sweep a large number of
-		// spans in order to find a few completely free spans
-		// (for example, in the garbage benchmark, this sweeps
-		// ~30x the number of pages its trying to allocate).
-		// If GC kept a bit for whether there were any marks
-		// in a span, we could release these free spans
-		// at the end of GC and eliminate this entirely.
-		mHeap_Reclaim(h, npage)
-	}
+	lock(&h.lock) // 加锁
 
 	// transfer stats from cache to global
-	// memstat 是用来对内存监控的，可忽略
-	memstats.heap_live += uint64(_g_.m.mcache.local_cachealloc)
 	_g_.m.mcache.local_cachealloc = 0
-	memstats.heap_scan += uint64(_g_.m.mcache.local_scan)
 	_g_.m.mcache.local_scan = 0
-	memstats.tinyallocs += uint64(_g_.m.mcache.local_tinyallocs)
 	_g_.m.mcache.local_tinyallocs = 0
 
 	gcController.revise()
@@ -452,18 +435,13 @@ func mHeap_Alloc_m(h *mheap, npage uintptr, sizeclass int32, large bool) *mspan 
 
 		// update stats, sweep lists
 		if large {
-			memstats.heap_objects++
-			memstats.heap_live += uint64(npage << _PageShift)
 			// Swept spans are at the end of lists.
-			if s.npages < uintptr(len(h.free)) { 把 span 放入相应 busy 链表中
+			if s.npages < uintptr(len(h.free)) { // 把 span 放入相应 busy 链表中
 				mSpanList_InsertBack(&h.busy[s.npages], s)
 			} else {
 				mSpanList_InsertBack(&h.busylarge, s)
 			}
 		}
-	}
-	if trace.enabled {
-		traceHeapAlloc()
 	}
 
 	// h_spans is accessed concurrently without synchronization

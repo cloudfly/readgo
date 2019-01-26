@@ -16,8 +16,8 @@ package runtime
 type mcentral struct {
 	lock      mutex
 	sizeclass int32
-	nonempty  mspan // list of spans with a free object
-	empty     mspan // list of spans with no free objects (or cached in an mcache)
+	nonempty  mspan // 带有待释放的 object 的 mspan 链表
+	empty     mspan // 所有 mspan 可用的，其中的 span 是在 mcache 中的
 }
 
 // Initialize a single central free list.
@@ -29,8 +29,6 @@ func mCentral_Init(c *mcentral, sizeclass int32) {
 
 // Allocate a span to use in an MCache.
 func mCentral_CacheSpan(c *mcentral) *mspan {
-	// Deduct credit for this span allocation and sweep if necessary.
-	deductSweepCredit(uintptr(class_to_size[c.sizeclass]), 0)
 
 	lock(&c.lock)
 	sg := mheap_.sweepgen
@@ -57,7 +55,7 @@ retry:
 		unlock(&c.lock)
 		goto havespan
 	}
-	// empty 里所有的 span 都已经没有空位置了，都满了
+	// nonempty 里所有的 span 都已经没有空位置了，都满了
 	// 没有找到 span, 从 empty 列表里找
 	for s = c.empty.next; s != &c.empty; s = s.next {
 		if s.sweepgen == sg-2 && cas(&s.sweepgen, sg-2, sg-1) {
