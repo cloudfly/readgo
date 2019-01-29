@@ -310,13 +310,13 @@ func mallocinit() {
 	// To overcome this we ask for PageSize more and round up the pointer.
 	p1 := round(p, _PageSize)
 	//
-	//      +         +                 +                                    +
-	//      |  512M   |      32G        |                512G                |
-	//      +----------------------------------------------------------------+
-	//      |  span   |     bitmap      |                arena               |
-	//      +----------------------------------------------------------------+
-	//      ^         ^                 ^                                    ^
-	// mheap.spans  mheap.bitmap   mheap.arena_start               mheap.arena_end
+	//      +         +                 +                                          +
+	//      |  512M   |      32G        |                     512G                 |
+	//      +----------------------------------------------------------------------+
+	//      |  span   |     bitmap      |                arena                     |
+	//      +----------------------------------------------------------------------+
+	//      ^         ^                 ^                 ^                        ^
+	// mheap.spans  mheap.bitmap   mheap.arena_start     mheap.arena_used       mheap.arena_end
 
 	mheap_.spans = (**mspan)(unsafe.Pointer(p1))
 	mheap_.bitmap = p1 + spansSize
@@ -330,7 +330,7 @@ func mallocinit() {
 		throw("misrounded allocation in mallocinit")
 	}
 
-	// Initialize the rest of the allocator.
+	// 初始化 mheap 结构中的其他字段
 	mHeap_Init(&mheap_, spansSize)
 	_g_ := getg()
 	_g_.m.mcache = allocmcache()
@@ -362,12 +362,12 @@ func sysReserveHigh(n uintptr, reserved *bool) unsafe.Pointer {
 // 在 arena区间的 used 内存扩充(增加) n。并对 span 和 bitmap 区间相应的进行设置。
 func mHeap_SysAlloc(h *mheap, n uintptr) unsafe.Pointer {
 
-	//
+	// 要扩充的 n 已经超过 arena 整个空间，这在 64 位系统上是不太可能的，毕竟 500G 内存空间啊。
 	if n > uintptr(h.arena_end)-uintptr(h.arena_used) {
 		// We are in 32-bit mode, maybe we didn't use all possible address space yet.
 		// Reserve some more space.
 		p_size := round(n+_PageSize, 256<<20)
-		new_end := h.arena_end + p_size
+		new_end := h.arena_end + p_size // 扩充后 arena_end 指向的内存地址
 		if new_end <= h.arena_start+_MaxArena32 {
 			// TODO: It would be bad if part of the arena
 			// is reserved and part is not.
@@ -397,12 +397,9 @@ func mHeap_SysAlloc(h *mheap, n uintptr) unsafe.Pointer {
 		// Keep taking from our reservation.
 		p := h.arena_used
 		sysMap((unsafe.Pointer)(p), n, h.arena_reserved, &memstats.heap_sys)
-		mHeap_MapBits(h, p+n)
-		mHeap_MapSpans(h, p+n)
+		mHeap_MapBits(h, p+n)  // 更新 bitmap 信息
+		mHeap_MapSpans(h, p+n) // 更新 span 信息
 		h.arena_used = p + n
-		if raceenabled {
-			racemapshadow((unsafe.Pointer)(p), n)
-		}
 
 		if uintptr(p)&(_PageSize-1) != 0 {
 			throw("misrounded allocation in MHeap_SysAlloc")
@@ -467,20 +464,9 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 		throw("mallocgc called with gcphase == _GCmarktermination")
 	}
 
+	// 申请的 0 大小空间的内存
 	if size == 0 {
 		return unsafe.Pointer(&zerobase)
-	}
-
-	if flags&flagNoScan == 0 && typ == nil {
-		throw("malloc missing type")
-	}
-
-	if debug.sbrk != 0 {
-		align := uintptr(16)
-		if typ != nil {
-			align = uintptr(typ.align)
-		}
-		return persistentalloc(size, align, &memstats.other_sys)
 	}
 
 	// Set mp.mallocing to keep from being preempted by GC.
@@ -496,13 +482,14 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 
 	shouldhelpgc := false
 	dataSize := size
-	// 当前 goroutine 所在线程M 的 mcache
+
+	// 当前 goroutine 所在线程 M 的 mcache，尝试从 cache 中获取内存空间
 	c := gomcache()
 	var s *mspan
 	var x unsafe.Pointer
 	// 空间较小的内存申请, 小于 32k
 	if size <= maxSmallSize {
-		// for tinySize
+		// 如果申请的是 tiny 大小的对象，也就是小于 16 字节
 		if flags&flagNoScan != 0 && size < maxTinySize {
 			// Tiny allocator.
 			//
@@ -535,6 +522,7 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			// reduces heap size by ~20%.
 			off := c.tinyoffset
 			// Align tiny pointer for required (conservative) alignment.
+			// 根据 size 的大小确定分配多少字节
 			if size&7 == 0 {
 				off = round(off, 8)
 			} else if size&3 == 0 {
@@ -574,6 +562,8 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			(*[2]uint64)(x)[1] = 0
 			// See if we need to replace the existing tiny block with the new one
 			// based on amount of remaining free space.
+			// 如果 size 小于 c.tinyoffset，就是说块 span 还有额外的空间可用于下次分配
+			// 如果 size >= c.tinyoffset 说明整块都给这个 tiny 对象用了，就不复制给 c.tiny 了，因为赋值了也没用
 			if size < c.tinyoffset {
 				c.tiny = x
 				c.tinyoffset = size
@@ -670,26 +660,8 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 		})
 	}
 
-	if raceenabled {
-		racemalloc(x, size)
-	}
-
 	mp.mallocing = 0
 	releasem(mp)
-
-	if debug.allocfreetrace != 0 {
-		tracealloc(x, size, typ)
-	}
-
-	if rate := MemProfileRate; rate > 0 {
-		if size < uintptr(rate) && int32(size) < c.next_sample {
-			c.next_sample -= int32(size)
-		} else {
-			mp := acquirem()
-			profilealloc(mp, x, size)
-			releasem(mp)
-		}
-	}
 
 	if shouldhelpgc && shouldtriggergc() {
 		startGC(gcBackgroundMode, false)

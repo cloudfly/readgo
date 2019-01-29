@@ -165,10 +165,6 @@ func mSpan_Sweep(s *mspan, preserve bool) bool {
 		throw("MSpan_Sweep: bad span state")
 	}
 
-	if trace.enabled {
-		traceGCSweepStart()
-	}
-
 	xadd64(&mheap_.pagesSwept, int64(s.npages))
 
 	cl := s.sizeclass
@@ -311,9 +307,7 @@ func mSpan_Sweep(s *mspan, preserve bool) bool {
 		c.local_largefree += size
 		res = true
 	}
-	if trace.enabled {
-		traceGCSweepDone()
-	}
+
 	return res
 }
 
