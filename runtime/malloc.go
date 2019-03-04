@@ -460,9 +460,6 @@ const (
 // Small objects are allocated from the per-P cache's free lists.
 // Large objects (> 32 kB) are allocated straight from the heap.
 func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
-	if gcphase == _GCmarktermination {
-		throw("mallocgc called with gcphase == _GCmarktermination")
-	}
 
 	// 申请的 0 大小空间的内存
 	if size == 0 {
@@ -523,11 +520,11 @@ func mallocgc(size uintptr, typ *_type, flags uint32) unsafe.Pointer {
 			off := c.tinyoffset
 			// Align tiny pointer for required (conservative) alignment.
 			// 根据 size 的大小确定分配多少字节
-			if size&7 == 0 {
+			if size&7 == 0 { // 大于等于 8B
 				off = round(off, 8)
-			} else if size&3 == 0 {
+			} else if size&3 == 0 { // 大于等于 4B
 				off = round(off, 4)
-			} else if size&1 == 0 {
+			} else if size&1 == 0 { // 大于等于 2B
 				off = round(off, 2)
 			}
 			// tiny 这个 span 中有足够的空间申请，

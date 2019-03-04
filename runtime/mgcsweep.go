@@ -222,12 +222,9 @@ func mSpan_Sweep(s *mspan, preserve bool) bool {
 	heapBitsSweepSpan(s.base(), size, n, func(p uintptr) {
 		// At this point we know that we are looking at garbage object
 		// that needs to be collected.
-		if debug.allocfreetrace != 0 {
-			tracefree(unsafe.Pointer(p), size)
-		}
 
 		// Reset to allocated+noscan.
-		if cl == 0 {
+		if cl == 0 { // 大对象
 			// Free large span.
 			if preserve {
 				throw("can't preserve large span")
@@ -240,12 +237,13 @@ func mSpan_Sweep(s *mspan, preserve bool) bool {
 
 			// Free the span after heapBitsSweepSpan
 			// returns, since it's not done with the span.
-			freeToHeap = true
+			freeToHeap = true // 大对象一个 span 里只有一个 object, 如果这个 object 释放了, 那么整个 span 也就可以释放了
 		} else {
+			// 小对象
 			// Free small object.
-			if size > 2*ptrSize {
+			if size > 2*ptrSize { // 大于 2 个字
 				*(*uintptr)(unsafe.Pointer(p + ptrSize)) = uintptrMask & 0xdeaddeaddeaddead // mark as "needs to be zeroed"
-			} else if size > ptrSize {
+			} else if size > ptrSize { // 小于 2 个字，但大于 1 个字
 				*(*uintptr)(unsafe.Pointer(p + ptrSize)) = 0
 			}
 			if head.ptr() == nil {
