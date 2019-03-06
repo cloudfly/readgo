@@ -571,9 +571,6 @@ HaveSpan:
 		h_spans[p+n] = s
 	}
 
-	memstats.heap_inuse += uint64(npage << _PageShift)
-	memstats.heap_idle -= uint64(npage << _PageShift)
-
 	//println("spanalloc", hex(s.start<<_PageShift))
 	if s.next != nil || s.prev != nil {
 		throw("still in list")
